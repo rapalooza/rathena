@@ -194,8 +194,10 @@ struct weapon_data {
 
 /// AutoSpell bonus struct
 struct s_autospell {
-	short id, lv, rate, flag;
-	unsigned short card_id;
+	uint16 id, lv, trigger_skill;
+	short rate, battle_flag;
+	t_itemid card_id;
+	uint8 flag;
 	bool lock;  // bAutoSpellOnSkill: blocks autospell from triggering again, while being executed
 };
 
@@ -240,6 +242,8 @@ struct s_autobonus {
 	char *bonus_script, *other_script;
 	int active;
 	unsigned int pos;
+
+	~s_autobonus();
 };
 
 /// Timed bonus 'bonus_script' struct [Cydh]
@@ -323,7 +327,6 @@ struct map_session_data {
 		t_itemid autolootid[AUTOLOOTITEM_SIZE]; // [Zephyrus]
 		unsigned short autoloottype;
 		unsigned int autolooting : 1; //performance-saver, autolooting state for @alootid
-		unsigned int autobonus; //flag to indicate if an autobonus is activated. [Inkfish]
 		unsigned int gmaster_flag : 1;
 		unsigned int prevend : 1;//used to flag wheather you've spent 40sp to open the vending or not.
 		unsigned int warping : 1;//states whether you're in the middle of a warp processing
@@ -340,6 +343,7 @@ struct map_session_data {
 		bool mail_writing; // Whether the player is currently writing a mail in RODEX or not
 		bool cashshop_open;
 		bool sale_open;
+		unsigned int lapine_ui : 3; // Lapine Synthesis/Upgrade UI is opened
 		unsigned int block_action : 10;
 		bool refineui_open;
 	} state;
@@ -486,12 +490,12 @@ struct map_session_data {
 	std::vector<s_addeffect> addeff, addeff_atked;
 	std::vector<s_addeffectonskill> addeff_onskill;
 	std::vector<s_item_bonus> skillatk, skillusesprate, skillusesp, skillheal, skillheal2, skillblown, skillcastrate, skillfixcastrate, subskill, skillcooldown, skillfixcast,
-		skillvarcast, skilldelay, itemhealrate, add_def, add_mdef, add_mdmg, reseff, itemgrouphealrate;
+		skillvarcast, skilldelay, itemhealrate, add_def, add_mdef, add_mdmg, reseff, itemgrouphealrate, itemsphealrate, itemgroupsphealrate;
 	std::vector<s_add_drop> add_drop;
 	std::vector<s_addele2> subele2;
 	std::vector<s_vanish_bonus> sp_vanish, hp_vanish;
 	std::vector<s_addrace2> subrace3;
-	std::vector<s_autobonus> autobonus, autobonus2, autobonus3; //Auto script on attack, when attacked, on skill usage
+	std::vector<std::shared_ptr<s_autobonus>> autobonus, autobonus2, autobonus3; //Auto script on attack, when attacked, on skill usage
 
 	// zeroed structures start here
 	struct s_regen {
@@ -535,6 +539,7 @@ struct map_session_data {
 		int classchange; // [Valaris]
 		int speed_rate, speed_add_rate, aspd_add;
 		int itemhealrate2; // [Epoque] Increase heal rate of all healing items.
+		int itemsphealrate2;
 		int shieldmdef;//royal guard's
 		unsigned int setitem_hash, setitem_hash2; //Split in 2 because shift operations only work on int ranges. [Skotlex]
 
@@ -545,7 +550,7 @@ struct map_session_data {
 		unsigned short unbreakable;	// chance to prevent ANY equipment breaking [celest]
 		unsigned short unbreakable_equip; //100% break resistance on certain equipment
 		unsigned short unstripable_equip;
-		int fixcastrate, varcastrate; // n/100
+		int fixcastrate, varcastrate, delayrate; // n/100
 		int add_fixcast, add_varcast; // in milliseconds
 		int ematk; // matk bonus from equipment
 		int eatk; // atk bonus from equipment
@@ -555,7 +560,7 @@ struct map_session_data {
 	} bonus;
 	// zeroed vars end here.
 
-	int castrate,delayrate,hprate,sprate,dsprate;
+	int castrate,hprate,sprate,dsprate;
 	int hprecov_rate,sprecov_rate;
 	int matk_rate;
 	int critical_rate,hit_rate,flee_rate,flee2_rate,def_rate,def2_rate,mdef_rate,mdef2_rate;
@@ -793,6 +798,7 @@ struct map_session_data {
 	e_instance_mode instance_mode; ///< Mode of instance player last leaves from (used for instance destruction button)
 
 	short setlook_head_top, setlook_head_mid, setlook_head_bottom, setlook_robe; ///< Stores 'setlook' script command values.
+	t_itemid last_lapine_box;
 
 #if PACKETVER_MAIN_NUM >= 20150507 || PACKETVER_RE_NUM >= 20150429 || defined(PACKETVER_ZERO)
 	std::vector<int16> hatEffects;
@@ -982,7 +988,7 @@ extern struct s_job_info job_info[CLASS_COUNT];
 #define pc_istrading(sd)      ( (sd)->npc_id || (sd)->state.vending || (sd)->state.buyingstore || (sd)->state.trading )
 // equals pc_cant_act2 and additionally checks for chat rooms and npcs
 #define pc_cant_act(sd)       ( (sd)->npc_id || (sd)->chatID || pc_cant_act2( (sd) ) )
-#define pc_cant_act2(sd)      ( (sd)->state.vending || (sd)->state.buyingstore || ((sd)->sc.opt1 && (sd)->sc.opt1 != OPT1_BURNING) || (sd)->state.trading || (sd)->state.storage_flag || (sd)->state.prevend || (sd)->state.refineui_open )
+#define pc_cant_act2(sd)      ( (sd)->state.vending || (sd)->state.buyingstore || ((sd)->sc.opt1 && (sd)->sc.opt1 != OPT1_BURNING) || (sd)->state.trading || (sd)->state.storage_flag || (sd)->state.prevend || (sd)->state.refineui_open || (sd)->state.lapine_ui )
 
 #define pc_setdir(sd,b,h)     ( (sd)->ud.dir = (b) ,(sd)->head_dir = (h) )
 #define pc_setchatid(sd,n)    ( (sd)->chatID = n )
@@ -1117,6 +1123,28 @@ public:
 
 extern AttendanceDatabase attendance_db;
 
+class PlayerStatPointDatabase : public YamlDatabase {
+private:
+	std::unordered_map<uint16, uint32> statpoint_table;
+
+public:
+	PlayerStatPointDatabase() : YamlDatabase("STATPOINT_DB", 1) {
+
+	}
+
+	void clear(){
+		statpoint_table.clear();
+	}
+	const std::string getDefaultLocation();
+	uint64 parseBodyNode(const YAML::Node& node);
+	void loadingFinished();
+
+	uint32 pc_gets_status_point(uint16 level);
+	uint32 get_table_point(uint16 level);
+};
+
+extern PlayerStatPointDatabase statpoint_db;
+
 /// Enum of Summoner Power of 
 enum e_summoner_power_type {
 	SUMMONER_POWER_LAND = 0,
@@ -1217,10 +1245,10 @@ bool pc_adoption(struct map_session_data *p1_sd, struct map_session_data *p2_sd,
 
 void pc_updateweightstatus(struct map_session_data *sd);
 
-bool pc_addautobonus(std::vector<s_autobonus> &bonus, const char *script, short rate, unsigned int dur, uint16 atk_type, const char *o_script, unsigned int pos, bool onskill);
-void pc_exeautobonus(struct map_session_data* sd, std::vector<s_autobonus> *bonus, struct s_autobonus *autobonus);
+bool pc_addautobonus(std::vector<std::shared_ptr<s_autobonus>> &bonus, const char *script, short rate, unsigned int dur, uint16 atk_type, const char *o_script, unsigned int pos, bool onskill);
+void pc_exeautobonus(struct map_session_data &sd, std::vector<std::shared_ptr<s_autobonus>> *bonus, std::shared_ptr<s_autobonus> autobonus);
 TIMER_FUNC(pc_endautobonus);
-void pc_delautobonus(struct map_session_data* sd, std::vector<s_autobonus> &bonus, bool restore);
+void pc_delautobonus(struct map_session_data &sd, std::vector<std::shared_ptr<s_autobonus>> &bonus, bool restore);
 
 void pc_bonus(struct map_session_data *sd, int type, int val);
 void pc_bonus2(struct map_session_data *sd, int type, int type2, int val);
@@ -1261,7 +1289,6 @@ void pc_gainexp_disp(struct map_session_data *sd, t_exp base_exp, t_exp next_bas
 void pc_lostexp(struct map_session_data *sd, t_exp base_exp, t_exp job_exp);
 t_exp pc_nextbaseexp(struct map_session_data *sd);
 t_exp pc_nextjobexp(struct map_session_data *sd);
-int pc_gets_status_point(int);
 int pc_need_status_point(struct map_session_data *,int,int);
 int pc_maxparameterincrease(struct map_session_data*,int);
 bool pc_statusup(struct map_session_data*,int,int);
@@ -1447,8 +1474,8 @@ void pc_bonus_script_clear(struct map_session_data *sd, uint16 flag);
 
 void pc_cell_basilica(struct map_session_data *sd);
 
-short pc_get_itemgroup_bonus(struct map_session_data* sd, t_itemid nameid);
-short pc_get_itemgroup_bonus_group(struct map_session_data* sd, uint16 group_id);
+short pc_get_itemgroup_bonus(struct map_session_data* sd, t_itemid nameid, std::vector<s_item_bonus>& bonuses);
+short pc_get_itemgroup_bonus_group(struct map_session_data* sd, uint16 group_id, std::vector<s_item_bonus>& bonuses);
 
 bool pc_is_same_equip_index(enum equip_index eqi, short *equip_index, short index);
 /// Check if player is Taekwon Ranker and the level is >= 90 (battle_config.taekwon_ranker_min_lv)
